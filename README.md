@@ -1,3 +1,9 @@
+# Note
+
+__We will try to add some interesting features to this chain, which will involve significant changes. I am one of the authors of the Spectrum chain, so it is possible that it will be merged into the Spectrum chain in the future.__
+
+__For now, we will continue using the name SMC, but we will change the chain ID. The main chain's SMT tokens cannot be used on this chain. We will create our own tokens for testing new features. If you are interested in participating, please contact me directly via email at cc14514@icloud.com.__
+
 # Spectrum
 
 ![光谱logo2(1).png](https://upload-images.jianshu.io/upload_images/528413-0c926281c1d94539.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/440)
@@ -15,9 +21,9 @@ Since the list of signers is 17, it is recommended that the confirmation number 
 ## List of Chain ID's:
 | Chain(s)    |  CHAIN_ID  | 
 | ----------  | :-----------:| 
-| mainnet     | 20180430     | 
-| testnet     | 2022         | 
-| devnet      | 4            | 
+| mainnet     | 111     | 
+| testnet     | 222         | 
+| devnet      | 333            | 
 
 ## Warning
 
