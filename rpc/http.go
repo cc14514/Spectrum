@@ -36,6 +36,9 @@ import (
 const (
 	contentType                 = "application/json"
 	maxHTTPRequestContentLength = 1024 * 128
+
+	XForwardedFor = "X-Forwarded-For"
+	XRealIP       = "X-Real-IP"
 )
 
 var nullAddr, _ = net.ResolveTCPAddr("tcp", "127.0.0.1:0")
@@ -146,6 +149,23 @@ func NewHTTPServer(cors []string, srv *Server) *http.Server {
 	return &http.Server{Handler: newCorsHandler(srv, cors)}
 }
 
+func RemoteIp(req *http.Request) string {
+	remoteAddr := req.RemoteAddr
+	if ip := req.Header.Get(XRealIP); ip != "" {
+		remoteAddr = ip
+	} else if ip = req.Header.Get(XForwardedFor); ip != "" {
+		remoteAddr = ip
+	} else {
+		remoteAddr, _, _ = net.SplitHostPort(remoteAddr)
+	}
+
+	if remoteAddr == "::1" {
+		remoteAddr = "127.0.0.1"
+	}
+
+	return remoteAddr
+}
+
 // ServeHTTP serves JSON-RPC requests over HTTP.
 func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Permit dumb empty requests for remote health-checks (AWS)
@@ -159,11 +179,18 @@ func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// All checks passed, create a codec that reads direct from the request body
 	// untilEOF and writes the response to w and order the server to process a
 	// single request.
+	ctx := r.Context()
+	ctx = context.WithValue(ctx, "remote", r.RemoteAddr)
+	ctx = context.WithValue(ctx, "scheme", r.Proto)
+	ctx = context.WithValue(ctx, "local", r.Host)
+	ctx = context.WithValue(ctx, "ip", RemoteIp(r))
+	ctx = context.WithValue(ctx, "jwt", r.Header.Get("jwt"))
+
 	codec := NewJSONCodec(&httpReadWriteNopCloser{r.Body, w})
 	defer codec.Close()
 
 	w.Header().Set("content-type", contentType)
-	srv.ServeSingleRequest(codec, OptionMethodInvocation)
+	srv.ServeSingleRequest(ctx, codec, OptionMethodInvocation)
 }
 
 // validateRequest returns a non-zero response code and error message if the

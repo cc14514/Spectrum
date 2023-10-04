@@ -119,3 +119,37 @@ var (
 	DurationLimit          = big.NewInt(13)                    // The decision boundary on the blocktime duration used to determine whether difficulty should go up or not.
 	Sip004GasLimit         = big.NewInt(40000000)              // Minimum gas limit after hardfork
 )
+
+// add by liangc : alibp2p stream protocol IDs >>>>
+
+type Alibp2pProtocol string
+
+func (a Alibp2pProtocol) String() string { return string(a) }
+
+const (
+	MsgPidTxV1_0_0    Alibp2pProtocol = "/msg/1.0.0"
+	MsgPidBlockV1_0_0 Alibp2pProtocol = "/msg/block/1.0.0"
+	MsgPidBlockV2_0_0 Alibp2pProtocol = "/msg/block/2.0.0"
+	MailBoxPidV1_0_0  Alibp2pProtocol = "/mailbox/1.0.0"
+	UnknowProtocol    Alibp2pProtocol = ""
+)
+
+// let channel to support more protocols
+var (
+	// tx channel
+	MsgpidTx = []Alibp2pProtocol{MsgPidTxV1_0_0}
+	// blk channel
+	MsgpidBlock = []Alibp2pProtocol{MsgPidBlockV1_0_0, MsgPidBlockV2_0_0}
+	// relay channel
+	Mailboxpid = []Alibp2pProtocol{MailBoxPidV1_0_0}
+
+	ParseAlibp2pProtocol = func(p string) Alibp2pProtocol {
+		return Alibp2pProtocol(p)
+	}
+)
+
+var (
+	MyId string //当前节点p256得的标致
+)
+
+// add by liangc : alibp2p stream protocol IDs <<<<

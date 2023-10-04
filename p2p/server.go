@@ -33,6 +33,7 @@ import (
 	"github.com/SmartMeshFoundation/Spectrum/p2p/discv5"
 	"github.com/SmartMeshFoundation/Spectrum/p2p/nat"
 	"github.com/SmartMeshFoundation/Spectrum/p2p/netutil"
+	"github.com/cc14514/go-cookiekit/collections/set"
 )
 
 const (
@@ -54,7 +55,10 @@ const (
 	frameWriteTimeout = 20 * time.Second
 )
 
-var errServerStopped = errors.New("server stopped")
+var (
+	errServerStopped = errors.New("server stopped")
+	errServerTimeout = errors.New("server timeout")
+)
 
 // Config holds Server options.
 type Config struct {
@@ -87,7 +91,8 @@ type Config struct {
 
 	// BootstrapNodes are used to establish connectivity
 	// with the rest of the network.
-	BootstrapNodes []*discover.Node
+	Alibp2pBootstrapNodes []string // add by liangc for alibp2p
+	BootstrapNodes        []*discover.Node
 
 	// BootstrapNodesV5 are used to establish connectivity
 	// with the rest of the network using the V5 discovery
@@ -176,6 +181,8 @@ type Server struct {
 	loopWG        sync.WaitGroup // loop, listenLoop
 	peerFeed      event.Feed
 	log           log.Logger
+
+	alibp2pService *Alibp2p // add by liangc
 }
 
 type peerOpFunc func(map[discover.NodeID]*Peer)
@@ -193,6 +200,8 @@ const (
 	staticDialedConn
 	inboundConn
 	trustedConn
+
+	ignoreConn // add by liangc : 握手时如果得到这个标记则表明 忽略握手保持连接
 )
 
 // conn wraps a network connection with information gathered
@@ -205,6 +214,10 @@ type conn struct {
 	id    discover.NodeID // valid after the encryption handshake
 	caps  []Cap           // valid after the protocol handshake
 	name  string          // valid after the protocol handshake
+
+	session        string   // add by liangc
+	protocols      *set.Set // 200813 : add by liangc : 用来判断 peer 是否支持某个版本的协议
+	alibp2pservice *Alibp2p // add by liangc
 }
 
 type transport interface {
@@ -720,7 +733,7 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *discover.Nod
 	return err
 }
 
-func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node) error {
+func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node, timeout ...time.Duration) error {
 	// Prevent leftover pending conns from entering the handshake.
 	srv.lock.Lock()
 	running := srv.running
@@ -740,7 +753,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node) e
 		clog.Trace("Dialed identity mismatch", "want", c, dialDest.ID)
 		return DiscUnexpectedIdentity
 	}
-	err = srv.checkpoint(c, srv.posthandshake)
+	err = srv.checkpoint(c, srv.posthandshake, timeout...)
 	if err != nil {
 		clog.Trace("Rejected peer before protocol handshake", "err", err)
 		return err
@@ -756,7 +769,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node) e
 		return DiscUnexpectedIdentity
 	}
 	c.caps, c.name = phs.Caps, phs.Name
-	err = srv.checkpoint(c, srv.addpeer)
+	err = srv.checkpoint(c, srv.addpeer, timeout...)
 	if err != nil {
 		clog.Trace("Rejected peer", "err", err)
 		return err
@@ -776,17 +789,31 @@ func truncateName(s string) string {
 
 // checkpoint sends the conn to run, which performs the
 // post-handshake checks for the stage (posthandshake, addpeer).
-func (srv *Server) checkpoint(c *conn, stage chan<- *conn) error {
+func (srv *Server) checkpoint(c *conn, stage chan<- *conn, timeout ...time.Duration) error {
+	tot := func() <-chan struct{} {
+		rch := make(chan struct{})
+		if len(timeout) > 0 && timeout[0] > 0 {
+			go func() {
+				<-time.After(timeout[0])
+				close(rch)
+			}()
+		}
+		return rch
+	}
 	select {
 	case stage <- c:
 	case <-srv.quit:
 		return errServerStopped
+	case <-tot():
+		return errServerTimeout
 	}
 	select {
 	case err := <-c.cont:
 		return err
 	case <-srv.quit:
 		return errServerStopped
+	case <-tot():
+		return errServerTimeout
 	}
 }
 
