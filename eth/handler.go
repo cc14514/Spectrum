@@ -255,61 +255,50 @@ func (pm *ProtocolManager) newPeer(pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *p
 // handle is the callback invoked to manage the life cycle of an eth peer. When
 // this function terminates, the peer is disconnected.
 func (pm *ProtocolManager) handle(p *peer) error {
-	if pm.peers.Len() >= pm.maxPeers {
-		return p2p.DiscTooManyPeers
-	}
-	p.Log().Debug("Ethereum peer connected", "name", p.Name())
+
+	p.Log().Debug("PDX peer connected", "name", p.Name())
 
 	// Execute the Ethereum handshake
-	td, head, genesis := pm.blockchain.Status()
-	if err := p.Handshake(pm.networkId, td, head, genesis); err != nil {
-		p.Log().Debug("Ethereum handshake failed", "peer", p.RemoteAddr(), "err", err)
+	var (
+		genesis = pm.blockchain.Genesis()
+		head    = pm.blockchain.CurrentHeader()
+		hash    = head.Hash()
+		number  = head.Number.Uint64()
+		td      = pm.blockchain.GetTd(hash, number)
+		flags   = p.Peer.Flags() // add by liangc
+	)
+
+	if err := p.Handshake(pm.networkId, td, hash, genesis.Hash(), flags); err != nil {
+		p.Log().Debug("PDX handshake failed", "err", err)
+		p2p.SendAddpeerHandshakeEvent(&p2p.AddpeerHandshakeEvent{p.ID().Bytes(), err}) // add by liangc
 		return err
 	}
-	p.Log().Debug("Ethereum hanshake success", "peer", p.RemoteAddr())
+
+	p2p.SendAddpeerHandshakeEvent(&p2p.AddpeerHandshakeEvent{p.ID().Bytes(), nil}) // add by liangc
 	if rw, ok := p.rw.(*meteredMsgReadWriter); ok {
 		rw.Init(p.version)
 	}
+
 	// Register the peer locally
+	log.Debug("pm handle > register")
 	if err := pm.peers.Register(p); err != nil {
-		p.Log().Error("Ethereum peer registration failed", "err", err)
+		p.Log().Error("PDX peer registration failed", "err", err)
 		return err
 	}
 	defer pm.removePeer(p.id)
 
 	// Register the peer in the downloader. If the downloader considers it banned, we disconnect
-	if err := pm.downloader.RegisterPeer(p.id, p.version, p); err != nil {
+	if err := pm.downloader.RegisterPeer(p.id, p.version, p, p.Peer); err != nil {
 		return err
 	}
-	// Propagate existing transactions. new transactions appearing
-	// after this will be sent via broadcasts.
-	pm.syncTransactions(p)
 
-	// If we're DAO hard-fork aware, validate any remote peer with regard to the hard-fork
-	if daoBlock := pm.chainconfig.DAOForkBlock; daoBlock != nil {
-		// Request the peer's DAO fork header for extra-data validation
-		if err := p.RequestHeadersByNumber(daoBlock.Uint64(), 1, 0, false); err != nil {
-			return err
-		}
-		// Start a timer to disconnect if the peer doesn't reply in time
-		p.forkDrop = time.AfterFunc(daoChallengeTimeout, func() {
-			p.Log().Debug("Timed out DAO fork-check, dropping")
-			pm.removePeer(p.id)
-		})
-		// Make sure it's cleaned up if the peer dies off
-		defer func() {
-			if p.forkDrop != nil {
-				p.forkDrop.Stop()
-				p.forkDrop = nil
-			}
-		}()
-	}
 	// main loop. handle incoming messages.
 	for {
 		if err := pm.handleMsg(p); err != nil {
-			p.Log().Debug("Ethereum message handling failed", "err", err)
+			p.Log().Debug("PDX message handling failed", "err", err)
 			return err
 		}
+
 	}
 }
 

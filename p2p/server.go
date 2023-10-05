@@ -18,15 +18,20 @@
 package p2p
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"github.com/cc14514/go-alibp2p"
+	"math/big"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/SmartMeshFoundation/Spectrum/common"
-	"github.com/SmartMeshFoundation/Spectrum/common/mclock"
 	"github.com/SmartMeshFoundation/Spectrum/event"
 	"github.com/SmartMeshFoundation/Spectrum/log"
 	"github.com/SmartMeshFoundation/Spectrum/p2p/discover"
@@ -147,6 +152,14 @@ type Config struct {
 
 	// Logger is a custom logger to use with the p2p.Server.
 	Logger log.Logger
+
+	// 200630 add by liangc
+	GenesisHash common.Hash
+
+	// 201221 add by liangc
+	NetmuxPort uint64
+
+	NetworkId uint64
 }
 
 // Server manages all peer connections.
@@ -194,6 +207,7 @@ type peerDrop struct {
 }
 
 type connFlag int
+type ConnFlag connFlag
 
 const (
 	dynDialedConn connFlag = 1 << iota
@@ -400,29 +414,46 @@ func (srv *Server) Start() (err error) {
 	srv.removestatic = make(chan *discover.Node)
 	srv.peerOp = make(chan peerOpFunc)
 	srv.peerOpDone = make(chan struct{})
+	// add by liangc : libp2p transport
+	srv.newTransport = newAlibp2pTransport
 
-	// node table
-	if !srv.NoDiscovery {
-		ntab, err := discover.ListenUDP(srv.PrivateKey, srv.ListenAddr, srv.NAT, srv.NodeDatabase, srv.NetRestrict)
-		if err != nil {
-			return err
-		}
-		if err := ntab.SetFallbackNodes(srv.BootstrapNodes); err != nil {
-			return err
-		}
-		srv.ntab = ntab
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		<-srv.quit
+		cancel()
+	}()
+
+	p2pport, err := strconv.Atoi(strings.Split(srv.Config.ListenAddr, ":")[1])
+	if err != nil {
+		p2pport = 0
 	}
 
-	if srv.DiscoveryV5 {
-		ntab, err := discv5.ListenUDP(srv.PrivateKey, srv.DiscoveryV5Addr, srv.NAT, "", srv.NetRestrict) //srv.NodeDatabase)
-		if err != nil {
-			return err
-		}
-		if err := ntab.SetFallbackNodes(srv.BootstrapNodesV5); err != nil {
-			return err
-		}
-		srv.DiscV5 = ntab
+	var muxPort uint64 = 5978
+	// add by liangc : 201221
+	if srv.Config.NetmuxPort > 0 {
+		muxPort = srv.Config.NetmuxPort
 	}
+
+	// add by liangc : 如果 networkid 不传，默认用 genesishash 作为 nid
+	var nid *big.Int
+	if srv.Config.NetworkId <= 0 {
+		nid = new(big.Int).SetBytes(srv.Config.GenesisHash.Bytes())
+	} else {
+		nid = big.NewInt(int64(srv.Config.NetworkId))
+	}
+
+	srv.alibp2pService = NewAlibp2p(
+		ctx,
+		p2pport,
+		int(muxPort),
+		srv.Config.MaxPeers,
+		nid, srv, nil, nil,
+		func(pubkey *ecdsa.PublicKey, msgType uint16, size uint32) error {
+			// TODO
+			return nil
+		})
+	srv.alibp2pService.Start()
 
 	dynPeers := (srv.MaxPeers + 1) / 2
 	if srv.NoDiscovery {
@@ -434,15 +465,6 @@ func (srv *Server) Start() (err error) {
 	srv.ourHandshake = &protoHandshake{Version: baseProtocolVersion, Name: srv.Name, ID: discover.PubkeyID(&srv.PrivateKey.PublicKey)}
 	for _, p := range srv.Protocols {
 		srv.ourHandshake.Caps = append(srv.ourHandshake.Caps, p.cap())
-	}
-	// listen/dial
-	if srv.ListenAddr != "" {
-		if err := srv.startListening(); err != nil {
-			return err
-		}
-	}
-	if srv.NoDial && srv.ListenAddr == "" {
-		srv.log.Warn("P2P server will be useless, neither dialing nor listening")
 	}
 
 	srv.loopWG.Add(1)
@@ -483,83 +505,37 @@ type dialer interface {
 func (srv *Server) run(dialstate dialer) {
 	defer srv.loopWG.Done()
 	var (
-		peers        = make(map[discover.NodeID]*Peer)
-		trusted      = make(map[discover.NodeID]bool, len(srv.TrustedNodes))
-		taskdone     = make(chan task, maxActiveDialTasks)
+		peers   = make(map[discover.NodeID]map[string]*Peer)
+		trusted = make(map[discover.NodeID]bool, len(srv.TrustedNodes))
+		// taskdone     = make(chan task, maxActiveDialTasks)
 		runningTasks []task
-		queuedTasks  []task // tasks that can't run yet
-	)
-	// Put trusted nodes into a map to speed up checks.
-	// Trusted peers are loaded on startup and cannot be
-	// modified while the server is running.
-	for _, n := range srv.TrustedNodes {
-		trusted[n.ID] = true
-	}
+		// queuedTasks  []task // tasks that can't run yet
 
-	// removes t from runningTasks
-	delTask := func(t task) {
-		for i := range runningTasks {
-			if runningTasks[i] == t {
-				runningTasks = append(runningTasks[:i], runningTasks[i+1:]...)
-				break
-			}
-		}
-	}
-	// starts until max number of active tasks is satisfied
-	startTasks := func(ts []task) (rest []task) {
-		i := 0
-		for ; len(runningTasks) < maxActiveDialTasks && i < len(ts); i++ {
-			t := ts[i]
-			srv.log.Trace("New dial task", "task", t)
-			go func() { t.Do(srv); taskdone <- t }()
-			runningTasks = append(runningTasks, t)
-		}
-		return ts[i:]
-	}
-	scheduleTasks := func() {
-		// Start from queue first.
-		queuedTasks = append(queuedTasks[:0], startTasks(queuedTasks)...)
-		// Query dialer for new tasks and start as many as possible now.
-		if len(runningTasks) < maxActiveDialTasks {
-			nt := dialstate.newTasks(len(runningTasks)+len(queuedTasks), peers, time.Now())
-			queuedTasks = append(queuedTasks, startTasks(nt)...)
-		}
-	}
+		peersLock    = new(sync.Mutex)
+		inboundCount = 0
+	)
 
 running:
 	for {
-		scheduleTasks()
-
 		select {
 		case <-srv.quit:
 			// The server was stopped. Run the cleanup logic.
 			break running
-		case n := <-srv.addstatic:
-			// This channel is used by AddPeer to add to the
-			// ephemeral static peer list. Add it to the dialer,
-			// it will keep the node connected.
-			srv.log.Debug("Adding static node", "node", n)
-			dialstate.addStatic(n)
-		case n := <-srv.removestatic:
-			// This channel is used by RemovePeer to send a
-			// disconnect request to a peer and begin the
-			// stop keeping the node connected
-			srv.log.Debug("Removing static node", "node", n)
-			dialstate.removeStatic(n)
-			if p, ok := peers[n.ID]; ok {
-				p.Disconnect(DiscRequested)
-			}
+		case <-srv.addstatic:
+			// pass
 		case op := <-srv.peerOp:
 			// This channel is used by Peers and PeerCount.
-			op(peers)
+			rpeers := make(map[discover.NodeID]*Peer)
+
+			for pid, pmap := range peers {
+				for _, p := range pmap {
+					rpeers[pid] = p
+					break
+				}
+			}
+			op(rpeers)
 			srv.peerOpDone <- struct{}{}
-		case t := <-taskdone:
-			// A task got done. Tell dialstate about it so it
-			// can update its state and remove it from the active
-			// tasks list.
-			srv.log.Trace("Dial task done", "task", t)
-			dialstate.taskDone(t, time.Now())
-			delTask(t)
+
 		case c := <-srv.posthandshake:
 			// A connection has passed the encryption handshake so
 			// the remote identity is known (but hasn't been verified yet).
@@ -569,14 +545,14 @@ running:
 			}
 			// TODO: track in-progress inbound node IDs (pre-Peer) to avoid dialing them.
 			select {
-			case c.cont <- srv.encHandshakeChecks(peers, c):
+			case c.cont <- srv.encHandshakeChecks(peers, inboundCount, c):
 			case <-srv.quit:
 				break running
 			}
 		case c := <-srv.addpeer:
 			// At this point the connection is past the protocol handshake.
 			// Its capabilities are known and the remote identity is verified.
-			err := srv.protoHandshakeChecks(peers, c)
+			err := srv.protoHandshakeChecks(peers, inboundCount, c)
 			if err == nil {
 				// The handshakes are done and it passed all checks.
 				p := newPeer(c, srv.Protocols)
@@ -586,9 +562,45 @@ running:
 					p.events = &srv.peerFeed
 				}
 				name := truncateName(c.name)
-				srv.log.Debug("Adding p2p peer", "name", name, "addr", c.fd.RemoteAddr(), "peers", len(peers)+1)
-				peers[c.id] = p
+				srv.log.Debug("Adding p2p peer", "name", name, "peers", len(peers)+1)
+				//srv.log.Debug("Adding p2p peer", "name", name, "addr", c.fd.RemoteAddr(), "peers", len(peers)+1)
+
+				addpeerFn := func() {
+					peersLock.Lock()
+					defer peersLock.Unlock()
+					pmap, ok := peers[c.id]
+					if !ok {
+						pmap = make(map[string]*Peer)
+					}
+					pmap[c.session] = p
+					peers[c.id] = pmap
+					//pubkey, _ := c.id.Pubkey()
+					//id, _ := alibp2p.ECDSAPubEncode(pubkey)
+					if p.Inbound() {
+						inboundCount++
+					}
+				}
+				addpeerEventCh := make(chan *AddpeerHandshakeEvent)
+				addpeerEventSub := SubscribeAddpeerHandshakeEvent(addpeerEventCh)
 				go srv.runPeer(p)
+				go func() {
+					defer func() {
+						addpeerEventSub.Unsubscribe()
+					}()
+					log.Debug("-> addpeer-handshake-start", "id", c.name, "session", c.session)
+					for e := range addpeerEventCh {
+						if !bytes.Equal(e.Id, p.ID().Bytes()) {
+							continue
+						}
+						if e.Err != nil {
+							log.Debug("-> addpeer-handshake-fail", "id", c.name, "session", c.session, "err", e.Err)
+							return
+						}
+						addpeerFn()
+						log.Debug("-> addpeer-handshake-success", "id", c.name, "session", c.session, "pmap", len(peers[c.id]))
+						return
+					}
+				}()
 			}
 			// The dialer logic relies on the assumption that
 			// dial tasks complete after the peer has been added or
@@ -599,10 +611,32 @@ running:
 				break running
 			}
 		case pd := <-srv.delpeer:
-			// A peer disconnected.
-			d := common.PrettyDuration(mclock.Now() - pd.created)
-			pd.log.Debug("Removing p2p peer", "duration", d, "peers", len(peers)-1, "req", pd.requested, "err", pd.err)
-			delete(peers, pd.ID())
+			func() {
+				peersLock.Lock()
+				defer peersLock.Unlock()
+				// TODO 清理 session
+				pmap, ok := peers[pd.ID()]
+				pubkey, _ := pd.ID().Pubkey()
+				id, _ := alibp2p.ECDSAPubEncode(pubkey)
+				//dellogAdd(id, pd.rw.session)
+				if pd.err.Error() == "unlink" {
+					delete(peers, pd.ID())
+				} else if ok {
+					delete(pmap, pd.rw.session)
+					log.Debug("<- delpeer : pmap-clean", "id", id, "session", pd.rw.session, "pmap", pmap)
+					if len(pmap) == 0 {
+						delete(peers, pd.ID())
+						log.Debug("<- delpeer : pmap-0", "id", id)
+					} else {
+						peers[pd.ID()] = pmap
+						log.Debug("<- delpeer : pmap-n", "id", id, "pmap", pmap)
+					}
+				}
+				log.Debug("<- delpeer", "err", pd.err, "id", id, "session", pd.rw.session, "pmap", pmap)
+				if pd.Inbound() {
+					inboundCount--
+				}
+			}()
 		}
 	}
 
@@ -616,40 +650,42 @@ running:
 		srv.DiscV5.Close()
 	}
 	// Disconnect all peers.
-	for _, p := range peers {
-		p.Disconnect(DiscQuitting)
+	for _, pmap := range peers {
+		for s, p := range pmap {
+			p.Disconnect(DiscQuitting)
+			log.Debug("DiscQuitting", "id", s, "session", p.rw.session)
+		}
 	}
 	// Wait for peers to shut down. Pending connections and tasks are
 	// not handled here and will terminate soon-ish because srv.quit
 	// is closed.
 	for len(peers) > 0 {
-		p := <-srv.delpeer
-		p.log.Trace("<-delpeer (spindown)", "remainingTasks", len(runningTasks))
-		delete(peers, p.ID())
+		select {
+		case p := <-srv.delpeer:
+			log.Trace("<-delpeer (spindown)", "remainingTasks", len(runningTasks))
+			delete(peers, p.ID())
+		case <-srv.quit:
+			return
+		}
+
 	}
 }
 
-func (srv *Server) protoHandshakeChecks(peers map[discover.NodeID]*Peer, c *conn) error {
+func (srv *Server) protoHandshakeChecks(peers map[discover.NodeID]map[string]*Peer, inboundCount int, c *conn) error {
 	// Drop connections with no matching protocols.
 	if len(srv.Protocols) > 0 && countMatchingProtocols(srv.Protocols, c.caps) == 0 {
 		return DiscUselessPeer
 	}
 	// Repeat the encryption handshake checks because the
 	// peer set might have changed between the handshakes.
-	return srv.encHandshakeChecks(peers, c)
+	return srv.encHandshakeChecks(peers, inboundCount, c)
 }
 
-func (srv *Server) encHandshakeChecks(peers map[discover.NodeID]*Peer, c *conn) error {
-	switch {
-	case !c.is(trustedConn|staticDialedConn) && len(peers) >= srv.MaxPeers:
-		return DiscTooManyPeers
-	case peers[c.id] != nil:
-		return DiscAlreadyConnected
-	case c.id == srv.Self().ID:
-		return DiscSelf
-	default:
-		return nil
-	}
+func (srv *Server) encHandshakeChecks(peers map[discover.NodeID]map[string]*Peer, inboundCount int, c *conn) error {
+	// XXX : modify by liangc , the verify process has moved to alibp2p
+	// XXX : modify by liangc , the verify process has moved to alibp2p
+	// XXX : modify by liangc , the verify process has moved to alibp2p
+	return nil
 }
 
 type tempError interface {
@@ -747,7 +783,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node, t
 		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
 		return err
 	}
-	clog := srv.log.New("id", c.id, "addr", c.fd.RemoteAddr(), "conn", c.flags)
+	clog := srv.log.New("id", c.id, "conn", c.flags)
 	// For dialed connections, check that the remote public key matches.
 	if dialDest != nil && c.id != dialDest.ID {
 		clog.Trace("Dialed identity mismatch", "want", c, dialDest.ID)

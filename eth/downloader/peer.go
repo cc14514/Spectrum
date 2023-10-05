@@ -22,6 +22,7 @@ package downloader
 import (
 	"errors"
 	"fmt"
+	"github.com/SmartMeshFoundation/Spectrum/p2p"
 	"math"
 	"math/big"
 	"sort"
@@ -389,7 +390,7 @@ func (ps *peerSet) Reset() {
 // The method also sets the starting throughput values of the new peer to the
 // average of all existing peers, to give it a realistic chance of being used
 // for data retrievals.
-func (ps *peerSet) Register(p *peerConnection) error {
+func (ps *peerSet) Register(p *peerConnection, peer *p2p.Peer) error {
 	// Retrieve the current median RTT as a sane default
 	p.rtt = ps.medianRTT()
 

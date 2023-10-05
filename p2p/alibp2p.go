@@ -29,7 +29,6 @@ import (
 	"math/big"
 	"net"
 	"os"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -1511,7 +1510,7 @@ func (self *Alibp2p) onDisconnected(session string, pubkey *ecdsa.PublicKey) {
 }
 
 func (self *Alibp2p) cleanConnect(pubkey *ecdsa.PublicKey, session, delpeerAction string) {
-	debug.PrintStack()
+	// debug.PrintStack()
 
 	id, _ := alibp2p.ECDSAPubEncode(pubkey)
 	key := genSessionkey(id, session)

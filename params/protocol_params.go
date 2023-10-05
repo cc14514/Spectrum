@@ -150,6 +150,10 @@ var (
 
 var (
 	MyId string //当前节点p256得的标致
+	// TODO init >>>>
+	Syncing    *int32
+	MaxMsgSize uint64 //限制最大的msg大小 计算公式 gaslimit/40=msg最大尺寸 (40是0字节占用的gas大小)
+	// TODO init <<<<
 )
 
 // add by liangc : alibp2p stream protocol IDs <<<<

@@ -115,6 +115,7 @@ type statusData struct {
 	TD              *big.Int
 	CurrentBlock    common.Hash
 	GenesisBlock    common.Hash
+	Flags           uint32 // add by liangc : check handshake state
 }
 
 // newBlockHashesData is the network packet for the block announcements.

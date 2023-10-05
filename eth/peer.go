@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"github.com/SmartMeshFoundation/Spectrum/common"
 	"github.com/SmartMeshFoundation/Spectrum/core/types"
+	"github.com/SmartMeshFoundation/Spectrum/log"
 	"github.com/SmartMeshFoundation/Spectrum/p2p"
 	"github.com/SmartMeshFoundation/Spectrum/rlp"
 	mapset "github.com/deckarep/golang-set"
@@ -229,22 +230,25 @@ func (p *peer) RequestReceipts(hashes []common.Hash) error {
 
 // Handshake executes the eth protocol handshake, negotiating version number,
 // network IDs, difficulties, head and genesis blocks.
-func (p *peer) Handshake(network uint64, td *big.Int, head common.Hash, genesis common.Hash) error {
+func (p *peer) Handshake(network uint64, td *big.Int, head common.Hash, genesis common.Hash, flags p2p.ConnFlag) error {
 	// Send out own handshake in a new thread
 	errc := make(chan error, 2)
 	var status statusData // safe to read after two values have been received from errc
 
 	go func() {
+		log.Debug("<- status msg", "id", p.Peer.Name())
 		errc <- p2p.Send(p.rw, StatusMsg, &statusData{
 			ProtocolVersion: uint32(p.version),
 			NetworkId:       network,
 			TD:              td,
 			CurrentBlock:    head,
 			GenesisBlock:    genesis,
+			Flags:           uint32(flags),
 		})
 	}()
+	local := time.Now().UnixNano() / 1000000
 	go func() {
-		errc <- p.readStatus(network, &status, genesis)
+		errc <- p.readStatus(local, &status, genesis)
 	}()
 	timeout := time.NewTimer(handshakeTimeout)
 	defer timeout.Stop()
@@ -252,6 +256,12 @@ func (p *peer) Handshake(network uint64, td *big.Int, head common.Hash, genesis 
 		select {
 		case err := <-errc:
 			if err != nil {
+				log.Error("handshake", "err", err)
+				return err
+			}
+			// add by liangc
+			if err := p.CheckFlags(int32(flags)); err != nil {
+				log.Warn("local ignore handshake", "id", p.Name())
 				return err
 			}
 		case <-timeout.C:
@@ -262,7 +272,7 @@ func (p *peer) Handshake(network uint64, td *big.Int, head common.Hash, genesis 
 	return nil
 }
 
-func (p *peer) readStatus(network uint64, status *statusData, genesis common.Hash) (err error) {
+func (p *peer) readStatus(local int64, status *statusData, genesis common.Hash) (err error) {
 	msg, err := p.rw.ReadMsg()
 	if err != nil {
 		return err
@@ -270,19 +280,23 @@ func (p *peer) readStatus(network uint64, status *statusData, genesis common.Has
 	if msg.Code != StatusMsg {
 		return errResp(ErrNoStatusMsg, "first msg has code %x (!= %x)", msg.Code, StatusMsg)
 	}
-	if msg.Size > ProtocolMaxMsgSize {
-		return errResp(ErrMsgTooLarge, "%v > %v", msg.Size, ProtocolMaxMsgSize)
+	if msg.Size > p2p.ProtocolMaxMsgSize {
+		return errResp(ErrMsgTooLarge, "%v > %v", msg.Size, p2p.ProtocolMaxMsgSize)
 	}
 	// Decode the handshake and make sure everything matches
 	if err := msg.Decode(&status); err != nil {
 		return errResp(ErrDecode, "msg %v: %v", msg, err)
 	}
+	// add by liangc
+	if err := p.CheckFlags(int32(status.Flags)); err != nil {
+		log.Warn("remote peer reject handshake", "id", p.Name())
+		return err
+	}
+
 	if status.GenesisBlock != genesis {
 		return errResp(ErrGenesisBlockMismatch, "%x (!= %x)", status.GenesisBlock[:8], genesis[:8])
 	}
-	if status.NetworkId != network {
-		return errResp(ErrNetworkIdMismatch, "%d (!= %d)", status.NetworkId, network)
-	}
+
 	if int(status.ProtocolVersion) != p.version {
 		return errResp(ErrProtocolVersionMismatch, "%d (!= %d)", status.ProtocolVersion, p.version)
 	}

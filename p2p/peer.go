@@ -17,7 +17,11 @@
 package p2p
 
 import (
+	"errors"
 	"fmt"
+	"github.com/SmartMeshFoundation/Spectrum/common"
+	"github.com/SmartMeshFoundation/Spectrum/crypto"
+	"github.com/SmartMeshFoundation/Spectrum/params"
 	"io"
 	"net"
 	"sort"
@@ -109,6 +113,9 @@ type Peer struct {
 
 	// events receives message send / receive events if set
 	events *event.Feed
+
+	id  common.Address // add by liangc : peer address , hash(pubkey)
+	Mrw MsgReadWriter  // add by liangc : abstract rw instance
 }
 
 // NewPeer returns a peer for testing purposes.
@@ -120,14 +127,51 @@ func NewPeer(id discover.NodeID, name string, caps []Cap) *Peer {
 	return peer
 }
 
+// add by liangc
+func (p *Peer) Flags() ConnFlag {
+	return ConnFlag(p.rw.flags)
+}
+
+// add by liangc
+func (p *Peer) CheckFlags(flags int32) error {
+	if flags == int32(ignoreConn) {
+		return errors.New(DiscUnlinkError.Error())
+	}
+	return nil
+}
+
 // ID returns the node's public key.
 func (p *Peer) ID() discover.NodeID {
-	return p.rw.id
+	// modify by liangc : 当用 newPeer2 时不存在 conn 对象，所以 id 为空
+	if p.rw != nil {
+		return p.rw.id
+	}
+	id := new(discover.NodeID)
+	copy(id[:], p.id.Bytes())
+	return *id
+}
+
+func (p *Peer) SID() discover.ShortID {
+	sid := discover.ShortID{}
+	copy(sid[:], crypto.Keccak256(p.rw.id[:])[12:])
+	return sid
+}
+
+func (p *Peer) GetFullID() string {
+	return p.rw.id.GetFullNodeID()
 }
 
 // Name returns the node name that the remote node advertised.
 func (p *Peer) Name() string {
 	return p.rw.name
+}
+
+// 200812 : add by liangc : peer 支持的协议
+func (p *Peer) SupportProtocol(protocol params.Alibp2pProtocol) bool {
+	if p.rw != nil && p.rw.protocols != nil {
+		return p.rw.protocols.Exists(protocol.String())
+	}
+	return false
 }
 
 // Caps returns the capabilities (supported subprotocols) of the remote peer.
@@ -138,12 +182,18 @@ func (p *Peer) Caps() []Cap {
 
 // RemoteAddr returns the remote address of the network connection.
 func (p *Peer) RemoteAddr() net.Addr {
-	return p.rw.fd.RemoteAddr()
+	if p.rw.fd != nil {
+		return p.rw.fd.RemoteAddr()
+	}
+	return &net.IPNet{}
 }
 
 // LocalAddr returns the local address of the network connection.
 func (p *Peer) LocalAddr() net.Addr {
-	return p.rw.fd.LocalAddr()
+	if p.rw.fd != nil {
+		return p.rw.fd.LocalAddr()
+	}
+	return &net.IPNet{}
 }
 
 // Disconnect terminates the peer connection with the given reason.
@@ -157,6 +207,9 @@ func (p *Peer) Disconnect(reason DiscReason) {
 
 // String implements fmt.Stringer.
 func (p *Peer) String() string {
+	if p.rw == nil {
+		return p.id.Hex()
+	}
 	return fmt.Sprintf("Peer %x %v", p.rw.id[:8], p.RemoteAddr())
 }
 

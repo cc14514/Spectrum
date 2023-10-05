@@ -125,8 +125,8 @@ var incompleteNodeURL = regexp.MustCompile("(?i)^(?:enode://)?([0-9a-f]+)$")
 //
 // For incomplete nodes, the designator must look like one of these
 //
-//    enode://<hex node id>
-//    <hex node id>
+//	enode://<hex node id>
+//	<hex node id>
 //
 // For complete nodes, the node ID is encoded in the username portion
 // of the URL, separated from the host by an @ sign. The hostname can
@@ -139,7 +139,7 @@ var incompleteNodeURL = regexp.MustCompile("(?i)^(?:enode://)?([0-9a-f]+)$")
 // a node with IP address 10.3.58.6, TCP listening port 30303
 // and UDP discovery port 30301.
 //
-//    enode://<hex node id>@10.3.58.6:30303?discport=30301
+//	enode://<hex node id>@10.3.58.6:30303?discport=30301
 func ParseNode(rawurl string) (*Node, error) {
 	if m := incompleteNodeURL.FindStringSubmatch(rawurl); m != nil {
 		id, err := HexID(m[1])
@@ -224,6 +224,7 @@ func (n *Node) UnmarshalText(text []byte) error {
 // NodeID is a unique identifier for each node.
 // The node identifier is a marshaled elliptic curve public key.
 type NodeID [NodeIDBits / 8]byte
+type ShortID [20]byte
 
 // Bytes returns a byte slice representation of the NodeID
 func (n NodeID) Bytes() []byte {
@@ -232,6 +233,14 @@ func (n NodeID) Bytes() []byte {
 
 // NodeID prints as a long hexadecimal number.
 func (n NodeID) String() string {
+	return fmt.Sprintf("%x", n[:])
+}
+
+func (n NodeID) NodeIDString() string {
+	return fmt.Sprintf("%x", n[:8])
+}
+
+func (n NodeID) GetFullNodeID() string {
 	return fmt.Sprintf("%x", n[:])
 }
 

@@ -47,7 +47,6 @@ import (
 	"github.com/SmartMeshFoundation/Spectrum/metrics"
 	"github.com/SmartMeshFoundation/Spectrum/node"
 	"github.com/SmartMeshFoundation/Spectrum/p2p"
-	"github.com/SmartMeshFoundation/Spectrum/p2p/discover"
 	"github.com/SmartMeshFoundation/Spectrum/p2p/discv5"
 	"github.com/SmartMeshFoundation/Spectrum/p2p/nat"
 	"github.com/SmartMeshFoundation/Spectrum/p2p/netutil"
@@ -590,31 +589,24 @@ func setNodeUserIdent(ctx *cli.Context, cfg *node.Config) {
 // setBootstrapNodes creates a list of bootstrap nodes from the command line
 // flags, reverting to pre-configured ones if none have been specified.
 func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
-	urls := params.MainnetBootnodes
-	switch {
-	case ctx.GlobalIsSet(BootnodesFlag.Name) || ctx.GlobalIsSet(BootnodesV4Flag.Name):
+
+	urls := make([]string, 0)
+	if ctx.GlobalIsSet(BootnodesFlag.Name) || ctx.GlobalIsSet(BootnodesV4Flag.Name) {
 		if ctx.GlobalIsSet(BootnodesV4Flag.Name) {
 			urls = strings.Split(ctx.GlobalString(BootnodesV4Flag.Name), ",")
 		} else {
 			urls = strings.Split(ctx.GlobalString(BootnodesFlag.Name), ",")
 		}
+	}
+	switch {
 	case ctx.GlobalBool(TestnetFlag.Name):
-		urls = params.TestnetBootnodes
+		urls = append(urls, params.TestnetBootnodes...)
 	case ctx.GlobalBool(DevnetFlag.Name):
-		urls = params.DevnetBootnodes
-	case cfg.BootstrapNodes != nil:
+		urls = append(urls, params.DevnetBootnodes...)
+	case cfg.Alibp2pBootstrapNodes != nil:
 		return // already set, don't apply defaults.
 	}
-
-	cfg.BootstrapNodes = make([]*discover.Node, 0, len(urls))
-	for _, url := range urls {
-		node, err := discover.ParseNode(url)
-		if err != nil {
-			log.Error("Bootstrap URL invalid", "enode", url, "err", err)
-			continue
-		}
-		cfg.BootstrapNodes = append(cfg.BootstrapNodes, node)
-	}
+	cfg.Alibp2pBootstrapNodes = urls
 }
 
 // setBootstrapNodesV5 creates a list of bootstrap nodes from the command line
@@ -809,9 +801,9 @@ func SetP2PConfig(ctx *cli.Context, cfg *p2p.Config) {
 	setNodeKey(ctx, cfg)
 	setNAT(ctx, cfg)
 	setListenAddress(ctx, cfg)
-	setDiscoveryV5Address(ctx, cfg)
 	setBootstrapNodes(ctx, cfg)
-	setBootstrapNodesV5(ctx, cfg)
+	//setDiscoveryV5Address(ctx, cfg)
+	// setBootstrapNodesV5(ctx, cfg)
 
 	if ctx.GlobalIsSet(MaxPeersFlag.Name) {
 		cfg.MaxPeers = ctx.GlobalInt(MaxPeersFlag.Name)
